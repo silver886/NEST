@@ -1,0 +1,83 @@
+name: Release application
+
+on:
+  workflow_call:
+    inputs:
+      configs:
+        description: Config suffix array; empty builds all config.*.json
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: silver886/github-actions/checkout@master
+
+      - name: Build executables
+        shell: bash
+        env:
+          CONFIGS: ${{ inputs.configs || '' }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          configs=()
+          if [ -z "$CONFIGS" ]; then
+            while IFS= read -r config; do
+              configs+=("$config")
+            done < <(find . -maxdepth 1 -type f -name 'config.*.json' -printf '%f\n' | sort)
+          else
+            normalized="$(printf '%s' "$CONFIGS" | tr "'" '"')"
+            while IFS= read -r name; do
+              case "$name" in
+                config.*.json) config="$name" ;;
+                *) config="config.${name}.json" ;;
+              esac
+              test -f "$config"
+              configs+=("$config")
+            done < <(jq -r '.[]' <<< "$normalized")
+          fi
+
+          if [ "${#configs[@]}" -eq 0 ]; then
+            echo "No config files found" >&2
+            exit 1
+          fi
+
+          printf 'Building configs:\n'
+          printf '  %s\n' "${configs[@]}"
+
+          for config in "${configs[@]}"; do
+            name="${config#config.}"
+            name="${name%.json}"
+            out_dir="dist/.${name}"
+            rm -rf "$out_dir"
+            mkdir -p "$out_dir"
+
+            podman image build \
+              --target artifact \
+              --build-arg "CONFIG_JSON=${config}" \
+              --output "type=local,dest=${out_dir}" \
+              --file Containerfile \
+              .
+
+            find "$out_dir" -maxdepth 1 -type f -name '*.exe' -exec mv '{}' dist/ \;
+            rmdir "$out_dir"
+          done
+
+          pushd dist
+          upx --ultra-brute $(ls)
+          ls -lh .
+          popd
+
+      - name: Upload release assets
+        uses: silver886/github-actions/create/release@master
+        with:
+          files: |
+            dist/*.exe
