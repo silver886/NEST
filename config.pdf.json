@@ -1,0 +1,34 @@
+{
+  "app": {
+    "identifier": "io.longhill.pdf",
+    "version": "1.0.0",
+    "title": "Stirling PDF",
+    "icon": "icon/stirling.png",
+    "url": {
+      "pdf": "https://pdf.longhill.io/"
+    },
+    "reuse_instance": true
+  },
+  "window": {
+    "width": 1280,
+    "height": 720,
+    "resizable": true,
+    "title_bar": true,
+    "fullscreen": false,
+    "maximized": false,
+    "always_on_top": false,
+    "close_to_tray": false,
+    "tray_menu": false
+  },
+  "webview": {
+    "incognito": true,
+    "mailto_url_template": "",
+    "args": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-blink-features=AutomationControlled --enable-features=SharedArrayBuffer --enable-unsafe-webgpu --force-dark-mode"
+  },
+  "enable_drag_drop": true,
+  "allow_new_windows": true,
+  "internal_url": {
+    "prefixes": [],
+    "regexes": []
+  }
+}

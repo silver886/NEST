@@ -1,0 +1,620 @@
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
+
+#[cfg(target_os = "windows")]
+mod app_config;
+#[cfg(target_os = "windows")]
+mod app_icon;
+
+#[cfg(target_os = "windows")]
+mod windows_app {
+    use super::app_config::{
+        ALLOW_NEW_WINDOWS, APP_IDENTIFIER, APP_REUSE_INSTANCE, APP_TITLE, APP_URLS, APP_VERSION,
+        ENABLE_DRAG_DROP, INTERNAL_URL_PREFIXES, INTERNAL_URL_REGEXES, MAILTO_URL_TEMPLATE,
+        WEBVIEW_ARGS, WEBVIEW_INCOGNITO, WINDOW_ALWAYS_ON_TOP, WINDOW_CLOSE_TO_TRAY,
+        WINDOW_FULLSCREEN, WINDOW_HEIGHT, WINDOW_MAXIMIZED, WINDOW_RESIZABLE, WINDOW_TITLE_BAR,
+        WINDOW_TRAY_MENU, WINDOW_WIDTH,
+    };
+    use super::app_icon::{APP_ICON_HEIGHT, APP_ICON_RGBA, APP_ICON_WIDTH};
+    use regex_lite::Regex;
+    use std::{
+        collections::HashMap,
+        env,
+        path::PathBuf,
+        process,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            OnceLock,
+        },
+    };
+    #[cfg(feature = "reuse-instance")]
+    use std::{
+        hash::{Hash, Hasher},
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        thread,
+        time::Duration,
+    };
+    use tao::{
+        dpi::LogicalSize,
+        event::{Event, WindowEvent},
+        event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget},
+        platform::windows::{EventLoopBuilderExtWindows, WindowBuilderExtWindows},
+        window::{Fullscreen, Icon as WindowIcon, Theme, Window, WindowBuilder, WindowId},
+    };
+    #[cfg(feature = "close-to-tray")]
+    use tray_icon::{
+        menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+        MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    };
+    use wry::{
+        NewWindowFeatures, NewWindowResponse, WebContext, WebView, WebViewBuilder,
+        WebViewBuilderExtWindows,
+    };
+
+    static WINDOW_COUNTER: AtomicUsize = AtomicUsize::new(1);
+    static INTERNAL_REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
+    static WEBVIEW_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+    enum UserEvent {
+        #[cfg(feature = "reuse-instance")]
+        OpenArg(Option<String>),
+        NewWindow(String, Option<LogicalSize<f64>>),
+        NewTitle(WindowId, String),
+        #[cfg(feature = "close-to-tray")]
+        TrayIconEvent(TrayIconEvent),
+        #[cfg(feature = "close-to-tray")]
+        MenuEvent(MenuEvent),
+    }
+
+    struct AppWindow {
+        window: Window,
+        _webview: WebView,
+    }
+
+    #[cfg(feature = "close-to-tray")]
+    struct AppTray {
+        _tray: TrayIcon,
+        new_window_id: Option<String>,
+        quit_id: Option<String>,
+    }
+
+    #[cfg(not(feature = "close-to-tray"))]
+    struct AppTray;
+
+    fn internal_regexes() -> &'static [Regex] {
+        INTERNAL_REGEXES
+            .get_or_init(|| {
+                INTERNAL_URL_REGEXES
+                    .iter()
+                    .filter_map(|pattern| Regex::new(pattern).ok())
+                    .collect()
+            })
+            .as_slice()
+    }
+
+    fn is_internal_url(url: &str) -> bool {
+        APP_URLS.iter().any(|(_, prefix)| url.starts_with(prefix))
+            || INTERNAL_URL_PREFIXES
+                .iter()
+                .any(|prefix| url.starts_with(prefix))
+            || internal_regexes()
+                .iter()
+                .any(|pattern| pattern.is_match(url))
+    }
+
+    fn open_external(url: &str) {
+        let _ = open::that_detached(url);
+    }
+
+    fn disable_drag_drop_script() -> &'static str {
+        r#"
+(() => {
+  const block = event => {
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  window.addEventListener('dragstart', block, true);
+  window.addEventListener('dragenter', block, true);
+  window.addEventListener('dragover', block, true);
+  window.addEventListener('drop', block, true);
+})();
+"#
+    }
+
+    fn percent_encode(value: &str) -> String {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        let mut encoded = String::with_capacity(value.len());
+
+        for byte in value.bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                encoded.push(byte as char);
+            } else {
+                encoded.push('%');
+                encoded.push(HEX[(byte >> 4) as usize] as char);
+                encoded.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+        }
+
+        encoded
+    }
+
+    fn mailto_url(mailto: &str) -> Option<String> {
+        let mailto = mailto.trim();
+        if !mailto
+            .get(..7)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mailto:"))
+        {
+            return None;
+        }
+
+        let encoded = percent_encode(mailto);
+        Some(if MAILTO_URL_TEMPLATE.contains("{}") {
+            MAILTO_URL_TEMPLATE.replace("{}", &encoded)
+        } else if MAILTO_URL_TEMPLATE.contains("%s") {
+            MAILTO_URL_TEMPLATE.replace("%s", &encoded)
+        } else {
+            format!("{MAILTO_URL_TEMPLATE}{encoded}")
+        })
+    }
+
+    fn next_window_label() -> String {
+        let id = WINDOW_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("window-{id}")
+    }
+
+    fn data_dir_prefix() -> String {
+        let app = APP_IDENTIFIER
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>();
+        format!("{app}-")
+    }
+
+    fn webview_data_dir() -> PathBuf {
+        WEBVIEW_DATA_DIR
+            .get_or_init(|| env::temp_dir().join(format!("{}{}", data_dir_prefix(), process::id())))
+            .clone()
+    }
+
+    fn app_url_for_selection(selection: Option<&str>) -> &'static str {
+        let default_url = APP_URLS
+            .first()
+            .map(|(_, url)| *url)
+            .unwrap_or("https://example.com/");
+
+        let Some(selection) = selection else {
+            return default_url;
+        };
+
+        APP_URLS
+            .iter()
+            .find_map(|(name, url)| (*name == selection).then_some(*url))
+            .unwrap_or(default_url)
+    }
+
+    #[cfg(feature = "close-to-tray")]
+    fn selected_app_url() -> &'static str {
+        app_url_for_selection(env::args().nth(1).as_deref())
+    }
+
+    fn start_url_from_arg(arg: Option<&str>) -> String {
+        arg.and_then(mailto_url)
+            .unwrap_or_else(|| app_url_for_selection(arg).to_string())
+    }
+
+    fn selected_start_url() -> String {
+        start_url_from_arg(env::args().nth(1).as_deref())
+    }
+
+    fn app_icon() -> Option<WindowIcon> {
+        WindowIcon::from_rgba(APP_ICON_RGBA.to_vec(), APP_ICON_WIDTH, APP_ICON_HEIGHT).ok()
+    }
+
+    #[cfg(feature = "close-to-tray")]
+    fn tray_icon() -> Option<tray_icon::Icon> {
+        tray_icon::Icon::from_rgba(APP_ICON_RGBA.to_vec(), APP_ICON_WIDTH, APP_ICON_HEIGHT).ok()
+    }
+
+    #[cfg(feature = "reuse-instance")]
+    fn reuse_instance_port() -> u16 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        APP_IDENTIFIER.hash(&mut hasher);
+        49_152 + (hasher.finish() % 12_000) as u16
+    }
+
+    #[cfg(feature = "reuse-instance")]
+    fn send_arg_to_existing_instance(arg: Option<&str>) -> bool {
+        if !APP_REUSE_INSTANCE {
+            return false;
+        }
+
+        let Ok(mut stream) = TcpStream::connect(("127.0.0.1", reuse_instance_port())) else {
+            return false;
+        };
+
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+        let payload = arg.unwrap_or_default();
+        stream.write_all(payload.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok()
+    }
+
+    #[cfg(not(feature = "reuse-instance"))]
+    fn send_arg_to_existing_instance(_arg: Option<&str>) -> bool {
+        let _ = APP_REUSE_INSTANCE;
+        false
+    }
+
+    #[cfg(feature = "reuse-instance")]
+    fn install_reuse_instance_listener(proxy: EventLoopProxy<UserEvent>) {
+        if !APP_REUSE_INSTANCE {
+            return;
+        }
+
+        let Ok(listener) = TcpListener::bind(("127.0.0.1", reuse_instance_port())) else {
+            return;
+        };
+
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream.take(4096);
+                let mut arg = String::new();
+                let _ = stream.read_to_string(&mut arg);
+                let arg = arg.trim_end_matches(&['\r', '\n'][..]).to_string();
+                let _ = proxy.send_event(UserEvent::OpenArg((!arg.is_empty()).then_some(arg)));
+            }
+        });
+    }
+
+    #[cfg(not(feature = "reuse-instance"))]
+    fn install_reuse_instance_listener(_proxy: EventLoopProxy<UserEvent>) {
+        let _ = APP_REUSE_INSTANCE;
+    }
+
+    #[cfg(feature = "close-to-tray")]
+    fn install_tray(proxy: EventLoopProxy<UserEvent>) -> Option<AppTray> {
+        if !WINDOW_CLOSE_TO_TRAY {
+            return None;
+        }
+
+        let mut tray_builder = TrayIconBuilder::new().with_tooltip(APP_TITLE);
+        if let Some(icon) = tray_icon() {
+            tray_builder = tray_builder.with_icon(icon);
+        }
+
+        let mut new_window_id = None;
+        let mut quit_id = None;
+
+        if WINDOW_TRAY_MENU {
+            let menu = Menu::new();
+            let new_window = MenuItem::new("New Window", true, None);
+            let quit = MenuItem::new("Quit", true, None);
+            let separator = PredefinedMenuItem::separator();
+            let _ = menu.append(&new_window);
+            let _ = menu.append(&separator);
+            let _ = menu.append(&quit);
+            new_window_id = Some(new_window.id().0.clone());
+            quit_id = Some(quit.id().0.clone());
+            tray_builder = tray_builder.with_menu(Box::new(menu));
+        }
+
+        let tray_proxy = proxy.clone();
+        TrayIconEvent::set_event_handler(Some(move |event| {
+            let _ = tray_proxy.send_event(UserEvent::TrayIconEvent(event));
+        }));
+
+        MenuEvent::set_event_handler(Some(move |event| {
+            let _ = proxy.send_event(UserEvent::MenuEvent(event));
+        }));
+
+        tray_builder.build().ok().map(|tray| AppTray {
+            _tray: tray,
+            new_window_id,
+            quit_id,
+        })
+    }
+
+    #[cfg(not(feature = "close-to-tray"))]
+    fn install_tray(_proxy: EventLoopProxy<UserEvent>) -> Option<AppTray> {
+        let _ = WINDOW_CLOSE_TO_TRAY;
+        let _ = WINDOW_TRAY_MENU;
+        None
+    }
+
+    fn build_window(
+        event_loop: &EventLoopWindowTarget<UserEvent>,
+        context: &mut WebContext,
+        proxy: EventLoopProxy<UserEvent>,
+        label: String,
+        url: String,
+        size: Option<LogicalSize<f64>>,
+        visible: bool,
+    ) -> Result<AppWindow, String> {
+        let fullscreen = WINDOW_FULLSCREEN.then_some(Fullscreen::Borderless(None));
+        let mut window_builder = WindowBuilder::new()
+            .with_title(APP_TITLE)
+            .with_inner_size(size.unwrap_or_else(|| LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT)))
+            .with_resizable(WINDOW_RESIZABLE)
+            .with_decorations(WINDOW_TITLE_BAR)
+            .with_fullscreen(fullscreen)
+            .with_maximized(WINDOW_MAXIMIZED)
+            .with_always_on_top(WINDOW_ALWAYS_ON_TOP)
+            .with_theme(Some(Theme::Dark))
+            .with_drag_and_drop(ENABLE_DRAG_DROP)
+            .with_visible(visible);
+
+        if let Some(icon) = app_icon() {
+            window_builder = window_builder
+                .with_window_icon(Some(icon.clone()))
+                .with_taskbar_icon(Some(icon));
+        }
+
+        let window = window_builder
+            .build(event_loop)
+            .map_err(|err| err.to_string())?;
+        let window_id = window.id();
+
+        let nav_handler = |url: String| {
+            if is_internal_url(&url) {
+                true
+            } else {
+                open_external(&url);
+                false
+            }
+        };
+
+        let new_window_proxy = proxy.clone();
+        let new_window_handler = move |url: String, features: NewWindowFeatures| {
+            if !ALLOW_NEW_WINDOWS {
+                return NewWindowResponse::Deny;
+            }
+
+            if !is_internal_url(&url) {
+                open_external(&url);
+                return NewWindowResponse::Deny;
+            }
+
+            let _ = new_window_proxy.send_event(UserEvent::NewWindow(url, features.size));
+            NewWindowResponse::Deny
+        };
+
+        let title_proxy = proxy;
+        let title_handler = move |title: String| {
+            let _ = title_proxy.send_event(UserEvent::NewTitle(window_id, title));
+        };
+
+        let mut webview_builder = WebViewBuilder::new_with_web_context(context)
+            .with_id(Box::leak(label.into_boxed_str()))
+            .with_url(url)
+            .with_incognito(WEBVIEW_INCOGNITO)
+            .with_navigation_handler(nav_handler)
+            .with_new_window_req_handler(new_window_handler)
+            .with_document_title_changed_handler(title_handler);
+
+        if !WEBVIEW_ARGS.is_empty() {
+            webview_builder = webview_builder.with_additional_browser_args(WEBVIEW_ARGS);
+        }
+        if !ENABLE_DRAG_DROP {
+            webview_builder = webview_builder
+                .with_initialization_script(disable_drag_drop_script())
+                .with_drag_drop_handler(|_| true);
+        }
+
+        let webview = webview_builder
+            .build(&window)
+            .map_err(|err| err.to_string())?;
+
+        Ok(AppWindow {
+            window,
+            _webview: webview,
+        })
+    }
+
+    fn build_profile_keeper(
+        event_loop: &EventLoopWindowTarget<UserEvent>,
+        context: &mut WebContext,
+    ) -> Result<AppWindow, String> {
+        let window = WindowBuilder::new()
+            .with_title(APP_TITLE)
+            .with_inner_size(LogicalSize::new(1.0, 1.0))
+            .with_visible(false)
+            .with_decorations(false)
+            .with_skip_taskbar(true)
+            .build(event_loop)
+            .map_err(|err| err.to_string())?;
+
+        let mut webview_builder = WebViewBuilder::new_with_web_context(context)
+            .with_id("__profile_keeper")
+            .with_url("about:blank")
+            .with_incognito(WEBVIEW_INCOGNITO);
+
+        if !WEBVIEW_ARGS.is_empty() {
+            webview_builder = webview_builder.with_additional_browser_args(WEBVIEW_ARGS);
+        }
+        if !ENABLE_DRAG_DROP {
+            webview_builder = webview_builder
+                .with_initialization_script(disable_drag_drop_script())
+                .with_drag_drop_handler(|_| true);
+        }
+
+        let webview = webview_builder
+            .build(&window)
+            .map_err(|err| err.to_string())?;
+
+        Ok(AppWindow {
+            window,
+            _webview: webview,
+        })
+    }
+
+    #[cfg(feature = "close-to-tray")]
+    fn activate_existing_windows_or_create(
+        windows: &mut HashMap<WindowId, AppWindow>,
+        event_loop: &EventLoopWindowTarget<UserEvent>,
+        context: &mut WebContext,
+        proxy: EventLoopProxy<UserEvent>,
+    ) {
+        if windows.is_empty() {
+            if let Ok(window) = build_window(
+                event_loop,
+                context,
+                proxy,
+                next_window_label(),
+                selected_app_url().to_string(),
+                None,
+                true,
+            ) {
+                windows.insert(window.window.id(), window);
+            }
+            return;
+        }
+
+        for app_window in windows.values() {
+            app_window.window.set_visible(true);
+            if app_window.window.is_minimized() {
+                app_window.window.set_minimized(false);
+            }
+            app_window.window.set_focus();
+        }
+    }
+
+    pub fn main() {
+        let _ = APP_VERSION;
+
+        let first_arg = env::args().nth(1);
+        if send_arg_to_existing_instance(first_arg.as_deref()) {
+            return;
+        }
+
+        let mut event_loop_builder = EventLoopBuilder::<UserEvent>::with_user_event();
+        event_loop_builder.with_theme(Some(Theme::Dark));
+        let event_loop = event_loop_builder.build();
+        let proxy = event_loop.create_proxy();
+        let mut web_context = WebContext::new(WEBVIEW_INCOGNITO.then(webview_data_dir));
+
+        install_reuse_instance_listener(proxy.clone());
+        #[cfg(feature = "close-to-tray")]
+        let tray = install_tray(proxy.clone());
+        #[cfg(not(feature = "close-to-tray"))]
+        install_tray(proxy.clone());
+
+        let mut windows = HashMap::new();
+        let _profile_keeper = (WEBVIEW_INCOGNITO && WINDOW_CLOSE_TO_TRAY)
+            .then(|| build_profile_keeper(&event_loop, &mut web_context).ok())
+            .flatten();
+        if let Ok(window) = build_window(
+            &event_loop,
+            &mut web_context,
+            proxy.clone(),
+            "main".into(),
+            selected_start_url(),
+            None,
+            true,
+        ) {
+            windows.insert(window.window.id(), window);
+        }
+
+        event_loop.run(move |event, event_loop, control_flow| {
+            *control_flow = ControlFlow::Wait;
+
+            match event {
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    window_id,
+                    ..
+                } => {
+                    windows.remove(&window_id);
+                    if windows.is_empty() && !WINDOW_CLOSE_TO_TRAY {
+                        *control_flow = ControlFlow::Exit;
+                    }
+                }
+                #[cfg(feature = "reuse-instance")]
+                Event::UserEvent(UserEvent::OpenArg(arg)) => {
+                    if let Ok(window) = build_window(
+                        event_loop,
+                        &mut web_context,
+                        proxy.clone(),
+                        next_window_label(),
+                        start_url_from_arg(arg.as_deref()),
+                        None,
+                        true,
+                    ) {
+                        windows.insert(window.window.id(), window);
+                    }
+                }
+                Event::UserEvent(UserEvent::NewWindow(url, size)) => {
+                    if let Ok(window) = build_window(
+                        event_loop,
+                        &mut web_context,
+                        proxy.clone(),
+                        next_window_label(),
+                        url,
+                        size,
+                        true,
+                    ) {
+                        windows.insert(window.window.id(), window);
+                    }
+                }
+                Event::UserEvent(UserEvent::NewTitle(window_id, title)) => {
+                    if let Some(app_window) = windows.get(&window_id) {
+                        app_window.window.set_title(&title);
+                    }
+                }
+                #[cfg(feature = "close-to-tray")]
+                Event::UserEvent(UserEvent::TrayIconEvent(event)) => {
+                    if matches!(
+                        event,
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } | TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        }
+                    ) {
+                        activate_existing_windows_or_create(
+                            &mut windows,
+                            event_loop,
+                            &mut web_context,
+                            proxy.clone(),
+                        );
+                    }
+                }
+                #[cfg(feature = "close-to-tray")]
+                Event::UserEvent(UserEvent::MenuEvent(event)) => {
+                    if let Some(tray) = &tray {
+                        let id = event.id.0.as_str();
+                        if tray.new_window_id.as_deref() == Some(id) {
+                            if let Ok(window) = build_window(
+                                event_loop,
+                                &mut web_context,
+                                proxy.clone(),
+                                next_window_label(),
+                                selected_app_url().to_string(),
+                                None,
+                                true,
+                            ) {
+                                windows.insert(window.window.id(), window);
+                            }
+                        } else if tray.quit_id.as_deref() == Some(id) {
+                            *control_flow = ControlFlow::Exit;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn main() {
+    windows_app::main();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn main() {
+    eprintln!("webview-app is currently Windows-only");
+}

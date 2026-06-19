@@ -1,0 +1,46 @@
+{
+  "app": {
+    "identifier": "me.proton",
+    "version": "1.0.0",
+    "title": "Proton",
+    "icon": "icon/proton.png",
+    "url": {
+      "account": "https://account.proton.me/",
+      "login": "https://account.proton.me/login",
+      "login-qr": "https://account.proton.me/sign-in-with-another-device",
+      "mail": "https://mail.proton.me/",
+      "calendar": "https://calendar.proton.me/",
+      "drive": "https://drive.proton.me/",
+      "pass": "https://pass.proton.me/",
+      "simplelogin": "https://app.simplelogin.io/",
+      "docs": "https://docs.proton.me/",
+      "sheets": "https://sheets.proton.me/",
+      "wallet": "https://wallet.proton.me/",
+      "lumo": "https://lumo.proton.me/",
+      "meet": "https://meet.proton.me/"
+    },
+    "reuse_instance": true
+  },
+  "window": {
+    "width": 1280,
+    "height": 720,
+    "resizable": true,
+    "title_bar": true,
+    "fullscreen": false,
+    "maximized": false,
+    "always_on_top": false,
+    "close_to_tray": false,
+    "tray_menu": true
+  },
+  "webview": {
+    "incognito": true,
+    "mailto_url_template": "https://mail.proton.me/u/0/inbox#mailto={}",
+    "args": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-blink-features=AutomationControlled --enable-features=SharedArrayBuffer --enable-unsafe-webgpu --force-dark-mode"
+  },
+  "enable_drag_drop": true,
+  "allow_new_windows": true,
+  "internal_url": {
+    "prefixes": [],
+    "regexes": []
+  }
+}

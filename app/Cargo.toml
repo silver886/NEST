@@ -1,0 +1,33 @@
+[package]
+name = "nest"
+version = "0.0.1"
+description = "NEST Encapsulates Sites as Tools"
+edition = "2024"
+rust-version = "1.96.0"
+build = "build.rs"
+
+[features]
+close-to-tray = ["tray-icon"]
+reuse-instance = []
+
+[dependencies]
+regex-lite = "0.1.9"
+
+[build-dependencies]
+winresource = { version = "=0.1.31", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+open = { version = "5.3.3", features = ["shellexecute-on-windows"] }
+tao = { version = "=0.35.3", default-features = false, features = ["rwh_06"] }
+tray-icon = { version = "=0.24.1", default-features = false, optional = true }
+wry = { version = "=0.55.1", default-features = false, features = ["protocol"] }
+
+[target.'cfg(not(windows))'.dependencies]
+open = "5.3.3"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = "thin"
+opt-level = "z"
+strip = true
