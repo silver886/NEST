@@ -3,7 +3,7 @@
     "identifier": "me.proton",
     "version": "1.0.0",
     "title": "Proton",
-    "icon": "icon/proton.png",
+    "icon": "icon/proton/png/proton.png",
     "url": {
       "account": "https://account.proton.me/",
       "login": "https://account.proton.me/login",
