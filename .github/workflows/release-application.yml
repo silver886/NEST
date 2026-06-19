@@ -29,21 +29,23 @@ jobs:
           mkdir -p dist
 
           configs=()
+          pushd ./config/
           if [ -z "$CONFIGS" ]; then
             while IFS= read -r config; do
               configs+=("$config")
-            done < <(find . -maxdepth 1 -type f -name 'config.*.json' -printf '%f\n' | sort)
+            done < <(find . -maxdepth 1 -type f -name '*.json' -printf '%p\n' | sort)
           else
             normalized="$(printf '%s' "$CONFIGS" | tr "'" '"')"
             while IFS= read -r name; do
               case "$name" in
-                config.*.json) config="$name" ;;
-                *) config="config.${name}.json" ;;
+                *.json) config="$name" ;;
+                *) config="${name}.json" ;;
               esac
               test -f "$config"
               configs+=("$config")
             done < <(jq -r '.[]' <<< "$normalized")
           fi
+          popd
 
           if [ "${#configs[@]}" -eq 0 ]; then
             echo "No config files found" >&2
@@ -54,15 +56,14 @@ jobs:
           printf '  %s\n' "${configs[@]}"
 
           for config in "${configs[@]}"; do
-            name="${config#config.}"
-            name="${name%.json}"
+            name="${config%.json}"
             out_dir="dist/.${name}"
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
 
             podman image build \
               --target artifact \
-              --build-arg "CONFIG_JSON=${config}" \
+              --build-arg "CONFIG_JSON=./config/${config}" \
               --output "type=local,dest=${out_dir}" \
               --file Containerfile \
               .
@@ -71,7 +72,7 @@ jobs:
             rmdir "$out_dir"
           done
 
-          pushd dist
+          pushd ./dist/
           upx --ultra-brute $(ls)
           ls -lh .
           popd

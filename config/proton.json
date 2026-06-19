@@ -29,7 +29,7 @@
     "fullscreen": false,
     "maximized": false,
     "always_on_top": false,
-    "close_to_tray": false,
+    "close_to_tray": true,
     "tray_menu": true
   },
   "webview": {

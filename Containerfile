@@ -39,8 +39,8 @@ RUN set -eux; \
     def app_urls: \
       (.app.url | to_entries | map(select(.value | type == "string"))); \
     [ \
-      "pub const APP_TITLE: &str = \(cfg(["app", "title"]; "Webview App") | @json);", \
-      "pub const APP_VERSION: &str = \(cfg(["app", "version"]; "1.0.0") | @json);", \
+      "pub const APP_TITLE: &str = \(cfg(["app", "title"]; "NEST") | @json);", \
+      "pub const APP_VERSION: &str = \(cfg(["app", "version"]; "0.1.0") | @json);", \
       "pub const APP_IDENTIFIER: &str = \(cfg(["app", "identifier"]; "com.example") | @json);", \
       "pub const APP_REUSE_INSTANCE: bool = \(cfg(["app", "reuse_instance"]; false));", \
       "pub const APP_URLS: &[(&str, &str)] = &[\((app_urls) | map("(\(.key | @json), \(.value | @json))") | join(", "))];", \
@@ -64,11 +64,12 @@ RUN set -eux; \
       "${CONFIG_JSON}" > ./app/src/app_config.rs
 
 RUN set -eux; \
+    sed -i 's/\r$//' ./app/Cargo.toml ./app/Cargo.lock; \
     old_cargo_name="$(awk '$1 == "name" && $2 == "=" { gsub("\"", "", $3); print $3; exit }' ./app/Cargo.toml)"; \
     old_cargo_version="$(awk '$1 == "version" && $2 == "=" { gsub("\"", "", $3); print $3; exit }' ./app/Cargo.toml)"; \
-    cargo_name="$(jq -r '(.app.identifier // "webview-app") | gsub("[^A-Za-z0-9_-]"; "-") | if length == 0 then "webview-app" else . end' "${CONFIG_JSON}")"; \
-    cargo_version="$(jq -r '.app.version // "1.0.0"' "${CONFIG_JSON}")"; \
-    cargo_description="$(jq -r '.app.title // "Webview App"' "${CONFIG_JSON}")"; \
+    cargo_name="$(jq -r '(.app.identifier // "nest") | gsub("[^A-Za-z0-9_-]"; "-") | if length == 0 then "nest" else . end' "${CONFIG_JSON}")"; \
+    cargo_version="$(jq -r '.app.version // "0.1.0"' "${CONFIG_JSON}")"; \
+    cargo_description="$(jq -r '.app.title // "NEST"' "${CONFIG_JSON}")"; \
     cargo_name_toml="$(jq -rn --arg value "$cargo_name" '$value | @json')"; \
     cargo_version_toml="$(jq -rn --arg value "$cargo_version" '$value | @json')"; \
     cargo_description_toml="$(jq -rn --arg value "$cargo_description" '$value | @json')"; \
@@ -129,7 +130,7 @@ RUN set -eux; \
 RUN set -eux; \
     mkdir -p ./out/; \
     output="$(realpath ./out/$(jq -r '.app.identifier // "app"' "${CONFIG_JSON}").exe)"; \
-    cargo_name="$(jq -r '(.app.identifier // "webview-app") | gsub("[^A-Za-z0-9_-]"; "-") | if length == 0 then "webview-app" else . end' "${CONFIG_JSON}")"; \
+    cargo_name="$(jq -r '(.app.identifier // "nest") | gsub("[^A-Za-z0-9_-]"; "-") | if length == 0 then "nest" else . end' "${CONFIG_JSON}")"; \
     cargo_features="$(jq -r '[if (.window.close_to_tray // false) then "close-to-tray" else empty end, if (.app.reuse_instance // false) then "reuse-instance" else empty end] | if length > 0 then "--features=" + join(",") else "" end' "${CONFIG_JSON}")"; \
     cargo build --release --locked --target x86_64-pc-windows-msvc --manifest-path=./app/Cargo.toml ${cargo_features}; \
     cp "./app/target/x86_64-pc-windows-msvc/release/${cargo_name}.exe" "$output"; \

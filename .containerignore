@@ -1,1 +1,4 @@
-rust-toolchain.toml
+*
+!app
+!config
+!icon
