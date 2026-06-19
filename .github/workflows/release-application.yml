@@ -73,6 +73,7 @@ jobs:
           done
 
           pushd ./dist/
+          upx --ultra-brute $(ls)
           ls -lh .
           popd
 

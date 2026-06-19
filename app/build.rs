@@ -12,8 +12,9 @@ fn main() {
 
     let mut resource = winresource::WindowsResource::new();
     let app_config = std::fs::read_to_string("src/app_config.rs").unwrap_or_default();
-    let app_identifier = const_str(&app_config, "APP_IDENTIFIER")
-        .unwrap_or_else(|| std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "webview-app".into()));
+    let app_identifier = const_str(&app_config, "APP_IDENTIFIER").unwrap_or_else(|| {
+        std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "webview-app".into())
+    });
     let app_title = const_str(&app_config, "APP_TITLE")
         .unwrap_or_else(|| std::env::var("CARGO_PKG_DESCRIPTION").unwrap_or_default());
     let app_version = const_str(&app_config, "APP_VERSION")

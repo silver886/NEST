@@ -1153,6 +1153,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nest"
+version = "0.0.1"
+dependencies = [
+ "dirs",
+ "open",
+ "regex-lite",
+ "tao",
+ "tray-icon",
+ "windows-sys 0.61.2",
+ "winresource",
+ "wry",
+]
+
+[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2210,18 +2224,6 @@ dependencies = [
  "phf_codegen",
  "string_cache",
  "string_cache_codegen",
-]
-
-[[package]]
-name = "nest"
-version = "0.0.1"
-dependencies = [
- "open",
- "regex-lite",
- "tao",
- "tray-icon",
- "winresource",
- "wry",
 ]
 
 [[package]]

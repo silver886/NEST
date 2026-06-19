@@ -7,17 +7,21 @@
 mod app_config;
 #[cfg(target_os = "windows")]
 mod app_icon;
+#[cfg(all(target_os = "windows", feature = "reuse-instance"))]
+mod single_instance;
 
 #[cfg(target_os = "windows")]
 mod windows_app {
     use super::app_config::{
-        ALLOW_NEW_WINDOWS, APP_IDENTIFIER, APP_REUSE_INSTANCE, APP_TITLE, APP_URLS, APP_VERSION,
-        ENABLE_DRAG_DROP, INTERNAL_URL_PREFIXES, INTERNAL_URL_REGEXES, MAILTO_URL_TEMPLATE,
-        WEBVIEW_ARGS, WEBVIEW_INCOGNITO, WINDOW_ALWAYS_ON_TOP, WINDOW_CLOSE_TO_TRAY,
-        WINDOW_FULLSCREEN, WINDOW_HEIGHT, WINDOW_MAXIMIZED, WINDOW_RESIZABLE, WINDOW_TITLE_BAR,
-        WINDOW_TRAY_MENU, WINDOW_WIDTH,
+        ALLOW_NEW_WINDOWS, APP_IDENTIFIER, APP_TITLE, APP_URLS, APP_VERSION, ENABLE_DRAG_DROP,
+        INTERNAL_URL_PREFIXES, INTERNAL_URL_REGEXES, MAILTO_URL_TEMPLATE, WEBVIEW_ARGS,
+        WEBVIEW_INCOGNITO, WINDOW_ALWAYS_ON_TOP, WINDOW_CLOSE_TO_TRAY, WINDOW_FULLSCREEN,
+        WINDOW_HEIGHT, WINDOW_MAXIMIZED, WINDOW_RESIZABLE, WINDOW_TITLE_BAR, WINDOW_TRAY_MENU,
+        WINDOW_WIDTH,
     };
     use super::app_icon::{APP_ICON_HEIGHT, APP_ICON_RGBA, APP_ICON_WIDTH};
+    #[cfg(feature = "reuse-instance")]
+    use super::single_instance::{self, InstanceClaim};
     use regex_lite::Regex;
     use std::{
         collections::HashMap,
@@ -25,17 +29,9 @@ mod windows_app {
         path::PathBuf,
         process,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             OnceLock,
+            atomic::{AtomicUsize, Ordering},
         },
-    };
-    #[cfg(feature = "reuse-instance")]
-    use std::{
-        hash::{Hash, Hasher},
-        io::{Read, Write},
-        net::{TcpListener, TcpStream},
-        thread,
-        time::Duration,
     };
     use tao::{
         dpi::LogicalSize,
@@ -46,8 +42,8 @@ mod windows_app {
     };
     #[cfg(feature = "close-to-tray")]
     use tray_icon::{
-        menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
         MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+        menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     };
     use wry::{
         NewWindowFeatures, NewWindowResponse, WebContext, WebView, WebViewBuilder,
@@ -173,9 +169,27 @@ mod windows_app {
         format!("{app}-")
     }
 
+    fn app_data_dir() -> PathBuf {
+        let app = APP_IDENTIFIER
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>();
+
+        dirs::data_local_dir()
+            .unwrap_or_else(env::temp_dir)
+            .join("nest")
+            .join(app)
+    }
+
     fn webview_data_dir() -> PathBuf {
         WEBVIEW_DATA_DIR
-            .get_or_init(|| env::temp_dir().join(format!("{}{}", data_dir_prefix(), process::id())))
+            .get_or_init(|| {
+                if WEBVIEW_INCOGNITO {
+                    env::temp_dir().join(format!("{}{}", data_dir_prefix(), process::id()))
+                } else {
+                    app_data_dir()
+                }
+            })
             .clone()
     }
 
@@ -219,58 +233,18 @@ mod windows_app {
     }
 
     #[cfg(feature = "reuse-instance")]
-    fn reuse_instance_port() -> u16 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        APP_IDENTIFIER.hash(&mut hasher);
-        49_152 + (hasher.finish() % 12_000) as u16
-    }
-
-    #[cfg(feature = "reuse-instance")]
-    fn send_arg_to_existing_instance(arg: Option<&str>) -> bool {
-        if !APP_REUSE_INSTANCE {
-            return false;
-        }
-
-        let Ok(mut stream) = TcpStream::connect(("127.0.0.1", reuse_instance_port())) else {
-            return false;
-        };
-
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-        let payload = arg.unwrap_or_default();
-        stream.write_all(payload.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok()
-    }
-
-    #[cfg(not(feature = "reuse-instance"))]
-    fn send_arg_to_existing_instance(_arg: Option<&str>) -> bool {
-        let _ = APP_REUSE_INSTANCE;
-        false
-    }
-
-    #[cfg(feature = "reuse-instance")]
     fn install_reuse_instance_listener(proxy: EventLoopProxy<UserEvent>) {
-        if !APP_REUSE_INSTANCE {
+        if !super::app_config::APP_REUSE_INSTANCE {
             return;
         }
 
-        let Ok(listener) = TcpListener::bind(("127.0.0.1", reuse_instance_port())) else {
-            return;
-        };
-
-        thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let mut stream = stream.take(4096);
-                let mut arg = String::new();
-                let _ = stream.read_to_string(&mut arg);
-                let arg = arg.trim_end_matches(&['\r', '\n'][..]).to_string();
-                let _ = proxy.send_event(UserEvent::OpenArg((!arg.is_empty()).then_some(arg)));
-            }
+        single_instance::listen(APP_IDENTIFIER, move |arg| {
+            let _ = proxy.send_event(UserEvent::OpenArg((!arg.is_empty()).then_some(arg)));
         });
     }
 
     #[cfg(not(feature = "reuse-instance"))]
-    fn install_reuse_instance_listener(_proxy: EventLoopProxy<UserEvent>) {
-        let _ = APP_REUSE_INSTANCE;
-    }
+    fn install_reuse_instance_listener(_proxy: EventLoopProxy<UserEvent>) {}
 
     #[cfg(feature = "close-to-tray")]
     fn install_tray(proxy: EventLoopProxy<UserEvent>) -> Option<AppTray> {
@@ -448,6 +422,14 @@ mod windows_app {
         })
     }
 
+    fn show_window_front(window: &Window) {
+        window.set_visible(true);
+        if window.is_minimized() {
+            window.set_minimized(false);
+        }
+        window.set_focus();
+    }
+
     #[cfg(feature = "close-to-tray")]
     fn activate_existing_windows_or_create(
         windows: &mut HashMap<WindowId, AppWindow>,
@@ -471,27 +453,37 @@ mod windows_app {
         }
 
         for app_window in windows.values() {
-            app_window.window.set_visible(true);
-            if app_window.window.is_minimized() {
-                app_window.window.set_minimized(false);
-            }
-            app_window.window.set_focus();
+            show_window_front(&app_window.window);
         }
     }
 
     pub fn main() {
         let _ = APP_VERSION;
 
+        #[cfg(feature = "reuse-instance")]
         let first_arg = env::args().nth(1);
-        if send_arg_to_existing_instance(first_arg.as_deref()) {
-            return;
-        }
+        #[cfg(feature = "reuse-instance")]
+        let instance_lock = match single_instance::claim_primary(
+            APP_IDENTIFIER,
+            super::app_config::APP_REUSE_INSTANCE,
+        ) {
+            InstanceClaim::Disabled | InstanceClaim::Failed => None,
+            InstanceClaim::Primary(lock) => Some(lock),
+            InstanceClaim::Secondary => {
+                let _ = single_instance::send_to_primary(APP_IDENTIFIER, first_arg.as_deref());
+                return;
+            }
+        };
+        #[cfg(not(feature = "reuse-instance"))]
+        let instance_lock = {
+            let _ = super::app_config::APP_REUSE_INSTANCE;
+        };
 
         let mut event_loop_builder = EventLoopBuilder::<UserEvent>::with_user_event();
         event_loop_builder.with_theme(Some(Theme::Dark));
         let event_loop = event_loop_builder.build();
         let proxy = event_loop.create_proxy();
-        let mut web_context = WebContext::new(WEBVIEW_INCOGNITO.then(webview_data_dir));
+        let mut web_context = WebContext::new(Some(webview_data_dir()));
 
         install_reuse_instance_listener(proxy.clone());
         #[cfg(feature = "close-to-tray")]
@@ -516,6 +508,7 @@ mod windows_app {
         }
 
         event_loop.run(move |event, event_loop, control_flow| {
+            let _ = &instance_lock;
             *control_flow = ControlFlow::Wait;
 
             match event {
@@ -540,6 +533,7 @@ mod windows_app {
                         None,
                         true,
                     ) {
+                        show_window_front(&window.window);
                         windows.insert(window.window.id(), window);
                     }
                 }
@@ -553,6 +547,7 @@ mod windows_app {
                         size,
                         true,
                     ) {
+                        show_window_front(&window.window);
                         windows.insert(window.window.id(), window);
                     }
                 }

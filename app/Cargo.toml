@@ -8,9 +8,10 @@ build = "build.rs"
 
 [features]
 close-to-tray = ["tray-icon"]
-reuse-instance = []
+reuse-instance = ["windows-sys"]
 
 [dependencies]
+dirs = "6.0.0"
 regex-lite = "0.1.9"
 
 [build-dependencies]
@@ -20,6 +21,7 @@ winresource = { version = "=0.1.31", default-features = false }
 open = { version = "5.3.3", features = ["shellexecute-on-windows"] }
 tao = { version = "=0.35.3", default-features = false, features = ["rwh_06"] }
 tray-icon = { version = "=0.24.1", default-features = false, optional = true }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"], optional = true }
 wry = { version = "=0.55.1", default-features = false, features = ["protocol"] }
 
 [target.'cfg(not(windows))'.dependencies]
