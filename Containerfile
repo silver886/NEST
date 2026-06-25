@@ -35,6 +35,7 @@ COPY ./ ./
 
 RUN set -eux; \
     test -f "${CONFIG_JSON}"; \
+    jq -e 'if (.app.close_to_tray // false) and ((.app.tray_icon // false) | not) then error("app.close_to_tray requires app.tray_icon=true") else true end' "${CONFIG_JSON}" >/dev/null; \
     jq -r 'def cfg(path; default): getpath(path) as $v | if $v == null then default else $v end; \
     def app_urls: \
       (.app.url | to_entries | map(select(.value | type == "string"))); \
@@ -43,6 +44,9 @@ RUN set -eux; \
       "pub const APP_VERSION: &str = \(cfg(["app", "version"]; "0.1.0") | @json);", \
       "pub const APP_IDENTIFIER: &str = \(cfg(["app", "identifier"]; "com.example") | @json);", \
       "pub const APP_REUSE_INSTANCE: bool = \(cfg(["app", "reuse_instance"]; false));", \
+      "pub const APP_CLOSE_TO_TRAY: bool = \(cfg(["app", "close_to_tray"]; false));", \
+      "pub const APP_TRAY_ICON: bool = \(cfg(["app", "tray_icon"]; false));", \
+      "pub const APP_NOTIFICATIONS: bool = \(cfg(["app", "notifications"]; false));", \
       "pub const APP_URLS: &[(&str, &str)] = &[\((app_urls) | map("(\(.key | @json), \(.value | @json))") | join(", "))];", \
       "pub const MAILTO_URL_TEMPLATE: &str = \(cfg(["webview", "mailto_url_template"]; "https://example.com/") | @json);", \
       "pub const WINDOW_WIDTH: f64 = \(cfg(["window", "width"]; 1280)) as f64;", \
@@ -52,11 +56,9 @@ RUN set -eux; \
       "pub const WINDOW_FULLSCREEN: bool = \(cfg(["window", "fullscreen"]; false));", \
       "pub const WINDOW_MAXIMIZED: bool = \(cfg(["window", "maximized"]; false));", \
       "pub const WINDOW_ALWAYS_ON_TOP: bool = \(cfg(["window", "always_on_top"]; false));", \
-      "pub const WINDOW_CLOSE_TO_TRAY: bool = \(cfg(["window", "close_to_tray"]; false));", \
-      "pub const WINDOW_TRAY_MENU: bool = \(cfg(["window", "tray_menu"]; false));", \
+      "pub const WINDOW_DRAG_DROP: bool = \(cfg(["window", "drag_drop"]; true));", \
+      "pub const WINDOW_ALLOW_NEW: bool = \(cfg(["window", "allow_new"]; true));", \
       "pub const WEBVIEW_INCOGNITO: bool = \(cfg(["webview", "incognito"]; true));", \
-      "pub const ENABLE_DRAG_DROP: bool = \(cfg(["enable_drag_drop"]; true));", \
-      "pub const ALLOW_NEW_WINDOWS: bool = \(cfg(["allow_new_windows"]; true));", \
       "pub const INTERNAL_URL_PREFIXES: &[&str] = &[\((.internal_url.prefixes // []) | map(@json) | join(", "))];", \
       "pub const INTERNAL_URL_REGEXES: &[&str] = &[\((.internal_url.regexes // []) | map(@json) | join(", "))];", \
       "pub const WEBVIEW_ARGS: &str = \(cfg(["webview", "args"]; "") | @json);" \
@@ -118,20 +120,13 @@ RUN set -eux; \
 RUN set -eux; \
     icon_src="./$(jq -r '.app.icon // "icon/icon.png"' "${CONFIG_JSON}")"; \
     test -f "$icon_src"; \
-    convert "$icon_src" -define icon:auto-resize=256,64,48,32,16 ./app/favicon.ico; \
-    { \
-      printf 'pub const APP_ICON_WIDTH: u32 = 32;\n'; \
-      printf 'pub const APP_ICON_HEIGHT: u32 = 32;\n'; \
-      printf 'pub const APP_ICON_RGBA: &[u8] = &[\n'; \
-      convert "$icon_src" -resize 32x32\! RGBA:- | od -An -tx1 -v | awk '{ for (i=1; i<=NF; i++) printf "0x%s,", $i; printf "\n" }'; \
-      printf '];\n'; \
-    } > ./app/src/app_icon.rs
+    convert "$icon_src" -define icon:auto-resize=256,64,48,32,16 ./app/favicon.ico
 
 RUN set -eux; \
     mkdir -p ./out/; \
     output="$(realpath ./out/$(jq -r '.app.identifier // "app"' "${CONFIG_JSON}").exe)"; \
     cargo_name="$(jq -r '(.app.identifier // "nest") | gsub("[^A-Za-z0-9_-]"; "-") | if length == 0 then "nest" else . end' "${CONFIG_JSON}")"; \
-    cargo_features="$(jq -r '[if (.window.close_to_tray // false) then "close-to-tray" else empty end, if (.app.reuse_instance // false) then "reuse-instance" else empty end] | if length > 0 then "--features=" + join(",") else "" end' "${CONFIG_JSON}")"; \
+    cargo_features="$(jq -r '[if (.app.tray_icon // false) then "tray-icon" else empty end, if (.app.reuse_instance // false) then "reuse-instance" else empty end, if (.app.notifications // false) then "notifications" else empty end] | if length > 0 then "--features=" + join(",") else "" end' "${CONFIG_JSON}")"; \
     cargo build --release --locked --target x86_64-pc-windows-msvc --manifest-path=./app/Cargo.toml ${cargo_features}; \
     cp "./app/target/x86_64-pc-windows-msvc/release/${cargo_name}.exe" "$output"; \
     ls -lh "$output"

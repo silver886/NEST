@@ -1161,6 +1161,7 @@ dependencies = [
  "regex-lite",
  "tao",
  "tray-icon",
+ "windows",
  "windows-sys 0.61.2",
  "winresource",
  "wry",

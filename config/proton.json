@@ -19,6 +19,9 @@
       "lumo": "https://lumo.proton.me/",
       "meet": "https://meet.proton.me/"
     },
+    "tray_icon": true,
+    "notifications": true,
+    "close_to_tray": true,
     "reuse_instance": true
   },
   "window": {
@@ -29,16 +32,14 @@
     "fullscreen": false,
     "maximized": false,
     "always_on_top": false,
-    "close_to_tray": true,
-    "tray_menu": true
+    "drag_drop": true,
+    "allow_new": true
   },
   "webview": {
     "incognito": true,
     "mailto_url_template": "https://mail.proton.me/u/0/inbox#mailto={}",
     "args": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-blink-features=AutomationControlled --enable-features=SharedArrayBuffer --enable-unsafe-webgpu --force-dark-mode"
   },
-  "enable_drag_drop": true,
-  "allow_new_windows": true,
   "internal_url": {
     "prefixes": [],
     "regexes": []

@@ -5,21 +5,20 @@
 
 #[cfg(target_os = "windows")]
 mod app_config;
-#[cfg(target_os = "windows")]
-mod app_icon;
 #[cfg(all(target_os = "windows", feature = "reuse-instance"))]
 mod single_instance;
+#[cfg(all(target_os = "windows", feature = "notifications"))]
+mod windows_notifications;
 
 #[cfg(target_os = "windows")]
 mod windows_app {
     use super::app_config::{
-        ALLOW_NEW_WINDOWS, APP_IDENTIFIER, APP_TITLE, APP_URLS, APP_VERSION, ENABLE_DRAG_DROP,
-        INTERNAL_URL_PREFIXES, INTERNAL_URL_REGEXES, MAILTO_URL_TEMPLATE, WEBVIEW_ARGS,
-        WEBVIEW_INCOGNITO, WINDOW_ALWAYS_ON_TOP, WINDOW_CLOSE_TO_TRAY, WINDOW_FULLSCREEN,
-        WINDOW_HEIGHT, WINDOW_MAXIMIZED, WINDOW_RESIZABLE, WINDOW_TITLE_BAR, WINDOW_TRAY_MENU,
+        APP_CLOSE_TO_TRAY, APP_IDENTIFIER, APP_NOTIFICATIONS, APP_TITLE, APP_TRAY_ICON, APP_URLS,
+        APP_VERSION, INTERNAL_URL_PREFIXES, INTERNAL_URL_REGEXES, MAILTO_URL_TEMPLATE,
+        WEBVIEW_ARGS, WEBVIEW_INCOGNITO, WINDOW_ALLOW_NEW, WINDOW_ALWAYS_ON_TOP, WINDOW_DRAG_DROP,
+        WINDOW_FULLSCREEN, WINDOW_HEIGHT, WINDOW_MAXIMIZED, WINDOW_RESIZABLE, WINDOW_TITLE_BAR,
         WINDOW_WIDTH,
     };
-    use super::app_icon::{APP_ICON_HEIGHT, APP_ICON_RGBA, APP_ICON_WIDTH};
     #[cfg(feature = "reuse-instance")]
     use super::single_instance::{self, InstanceClaim};
     use regex_lite::Regex;
@@ -34,13 +33,13 @@ mod windows_app {
         },
     };
     use tao::{
-        dpi::LogicalSize,
+        dpi::{LogicalSize, PhysicalSize},
         event::{Event, WindowEvent},
         event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget},
-        platform::windows::{EventLoopBuilderExtWindows, WindowBuilderExtWindows},
+        platform::windows::{EventLoopBuilderExtWindows, IconExtWindows, WindowBuilderExtWindows},
         window::{Fullscreen, Icon as WindowIcon, Theme, Window, WindowBuilder, WindowId},
     };
-    #[cfg(feature = "close-to-tray")]
+    #[cfg(feature = "tray-icon")]
     use tray_icon::{
         MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
         menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -54,14 +53,16 @@ mod windows_app {
     static INTERNAL_REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
     static WEBVIEW_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+    const APP_ICON_RESOURCE_ID: u16 = 1;
+
     enum UserEvent {
         #[cfg(feature = "reuse-instance")]
         OpenArg(Option<String>),
         NewWindow(String, Option<LogicalSize<f64>>),
         NewTitle(WindowId, String),
-        #[cfg(feature = "close-to-tray")]
+        #[cfg(feature = "tray-icon")]
         TrayIconEvent(TrayIconEvent),
-        #[cfg(feature = "close-to-tray")]
+        #[cfg(feature = "tray-icon")]
         MenuEvent(MenuEvent),
     }
 
@@ -70,14 +71,14 @@ mod windows_app {
         _webview: WebView,
     }
 
-    #[cfg(feature = "close-to-tray")]
+    #[cfg(feature = "tray-icon")]
     struct AppTray {
         _tray: TrayIcon,
         new_window_id: Option<String>,
         quit_id: Option<String>,
     }
 
-    #[cfg(not(feature = "close-to-tray"))]
+    #[cfg(not(feature = "tray-icon"))]
     struct AppTray;
 
     fn internal_regexes() -> &'static [Regex] {
@@ -193,6 +194,37 @@ mod windows_app {
             .clone()
     }
 
+    #[cfg(feature = "notifications")]
+    fn install_windows_notifications() {
+        if APP_NOTIFICATIONS {
+            super::windows_notifications::install(APP_IDENTIFIER, APP_TITLE);
+        }
+    }
+
+    #[cfg(not(feature = "notifications"))]
+    fn install_windows_notifications() {
+        let _ = APP_NOTIFICATIONS;
+    }
+
+    #[cfg(feature = "notifications")]
+    fn notify_download_finished(path: Option<&PathBuf>, success: bool) {
+        if !APP_NOTIFICATIONS {
+            return;
+        }
+
+        let (title, body, download_path) = if success {
+            (
+                "Download completed",
+                path.map(|path| format!("Saved to {}", path.display()))
+                    .unwrap_or_else(|| "Download completed".to_string()),
+                path.map(PathBuf::as_path),
+            )
+        } else {
+            ("Download failed", "Download failed".to_string(), None)
+        };
+        super::windows_notifications::notify(APP_IDENTIFIER, title, &body, download_path);
+    }
+
     fn app_url_for_selection(selection: Option<&str>) -> &'static str {
         let default_url = APP_URLS
             .first()
@@ -209,7 +241,7 @@ mod windows_app {
             .unwrap_or(default_url)
     }
 
-    #[cfg(feature = "close-to-tray")]
+    #[cfg(feature = "tray-icon")]
     fn selected_app_url() -> &'static str {
         app_url_for_selection(env::args().nth(1).as_deref())
     }
@@ -224,12 +256,12 @@ mod windows_app {
     }
 
     fn app_icon() -> Option<WindowIcon> {
-        WindowIcon::from_rgba(APP_ICON_RGBA.to_vec(), APP_ICON_WIDTH, APP_ICON_HEIGHT).ok()
+        WindowIcon::from_resource(APP_ICON_RESOURCE_ID, Some(PhysicalSize::new(32, 32))).ok()
     }
 
-    #[cfg(feature = "close-to-tray")]
+    #[cfg(feature = "tray-icon")]
     fn tray_icon() -> Option<tray_icon::Icon> {
-        tray_icon::Icon::from_rgba(APP_ICON_RGBA.to_vec(), APP_ICON_WIDTH, APP_ICON_HEIGHT).ok()
+        tray_icon::Icon::from_resource(APP_ICON_RESOURCE_ID, Some((32, 32))).ok()
     }
 
     #[cfg(feature = "reuse-instance")]
@@ -246,9 +278,9 @@ mod windows_app {
     #[cfg(not(feature = "reuse-instance"))]
     fn install_reuse_instance_listener(_proxy: EventLoopProxy<UserEvent>) {}
 
-    #[cfg(feature = "close-to-tray")]
+    #[cfg(feature = "tray-icon")]
     fn install_tray(proxy: EventLoopProxy<UserEvent>) -> Option<AppTray> {
-        if !WINDOW_CLOSE_TO_TRAY {
+        if !APP_TRAY_ICON {
             return None;
         }
 
@@ -257,21 +289,16 @@ mod windows_app {
             tray_builder = tray_builder.with_icon(icon);
         }
 
-        let mut new_window_id = None;
-        let mut quit_id = None;
-
-        if WINDOW_TRAY_MENU {
-            let menu = Menu::new();
-            let new_window = MenuItem::new("New Window", true, None);
-            let quit = MenuItem::new("Quit", true, None);
-            let separator = PredefinedMenuItem::separator();
-            let _ = menu.append(&new_window);
-            let _ = menu.append(&separator);
-            let _ = menu.append(&quit);
-            new_window_id = Some(new_window.id().0.clone());
-            quit_id = Some(quit.id().0.clone());
-            tray_builder = tray_builder.with_menu(Box::new(menu));
-        }
+        let menu = Menu::new();
+        let new_window = MenuItem::new("New Window", true, None);
+        let quit = MenuItem::new("Quit", true, None);
+        let separator = PredefinedMenuItem::separator();
+        let _ = menu.append(&new_window);
+        let _ = menu.append(&separator);
+        let _ = menu.append(&quit);
+        let new_window_id = Some(new_window.id().0.clone());
+        let quit_id = Some(quit.id().0.clone());
+        tray_builder = tray_builder.with_menu(Box::new(menu));
 
         let tray_proxy = proxy.clone();
         TrayIconEvent::set_event_handler(Some(move |event| {
@@ -289,11 +316,21 @@ mod windows_app {
         })
     }
 
-    #[cfg(not(feature = "close-to-tray"))]
+    #[cfg(not(feature = "tray-icon"))]
     fn install_tray(_proxy: EventLoopProxy<UserEvent>) -> Option<AppTray> {
-        let _ = WINDOW_CLOSE_TO_TRAY;
-        let _ = WINDOW_TRAY_MENU;
+        let _ = APP_CLOSE_TO_TRAY;
+        let _ = APP_TRAY_ICON;
         None
+    }
+
+    #[cfg(feature = "tray-icon")]
+    fn keep_alive_on_close() -> bool {
+        APP_CLOSE_TO_TRAY && APP_TRAY_ICON
+    }
+
+    #[cfg(not(feature = "tray-icon"))]
+    fn keep_alive_on_close() -> bool {
+        false
     }
 
     fn build_window(
@@ -315,7 +352,7 @@ mod windows_app {
             .with_maximized(WINDOW_MAXIMIZED)
             .with_always_on_top(WINDOW_ALWAYS_ON_TOP)
             .with_theme(Some(Theme::Dark))
-            .with_drag_and_drop(ENABLE_DRAG_DROP)
+            .with_drag_and_drop(WINDOW_DRAG_DROP)
             .with_visible(visible);
 
         if let Some(icon) = app_icon() {
@@ -340,7 +377,7 @@ mod windows_app {
 
         let new_window_proxy = proxy.clone();
         let new_window_handler = move |url: String, features: NewWindowFeatures| {
-            if !ALLOW_NEW_WINDOWS {
+            if !WINDOW_ALLOW_NEW {
                 return NewWindowResponse::Deny;
             }
 
@@ -366,10 +403,21 @@ mod windows_app {
             .with_new_window_req_handler(new_window_handler)
             .with_document_title_changed_handler(title_handler);
 
+        #[cfg(feature = "notifications")]
+        {
+            if APP_NOTIFICATIONS {
+                webview_builder = webview_builder
+                    .with_download_started_handler(|_, _| true)
+                    .with_download_completed_handler(|_, path, success| {
+                        notify_download_finished(path.as_ref(), success);
+                    });
+            }
+        }
+
         if !WEBVIEW_ARGS.is_empty() {
             webview_builder = webview_builder.with_additional_browser_args(WEBVIEW_ARGS);
         }
-        if !ENABLE_DRAG_DROP {
+        if !WINDOW_DRAG_DROP {
             webview_builder = webview_builder
                 .with_initialization_script(disable_drag_drop_script())
                 .with_drag_drop_handler(|_| true);
@@ -406,7 +454,7 @@ mod windows_app {
         if !WEBVIEW_ARGS.is_empty() {
             webview_builder = webview_builder.with_additional_browser_args(WEBVIEW_ARGS);
         }
-        if !ENABLE_DRAG_DROP {
+        if !WINDOW_DRAG_DROP {
             webview_builder = webview_builder
                 .with_initialization_script(disable_drag_drop_script())
                 .with_drag_drop_handler(|_| true);
@@ -430,7 +478,7 @@ mod windows_app {
         window.set_focus();
     }
 
-    #[cfg(feature = "close-to-tray")]
+    #[cfg(feature = "tray-icon")]
     fn activate_existing_windows_or_create(
         windows: &mut HashMap<WindowId, AppWindow>,
         event_loop: &EventLoopWindowTarget<UserEvent>,
@@ -459,6 +507,7 @@ mod windows_app {
 
     pub fn main() {
         let _ = APP_VERSION;
+        install_windows_notifications();
 
         #[cfg(feature = "reuse-instance")]
         let first_arg = env::args().nth(1);
@@ -486,13 +535,13 @@ mod windows_app {
         let mut web_context = WebContext::new(Some(webview_data_dir()));
 
         install_reuse_instance_listener(proxy.clone());
-        #[cfg(feature = "close-to-tray")]
+        #[cfg(feature = "tray-icon")]
         let tray = install_tray(proxy.clone());
-        #[cfg(not(feature = "close-to-tray"))]
+        #[cfg(not(feature = "tray-icon"))]
         install_tray(proxy.clone());
 
         let mut windows = HashMap::new();
-        let _profile_keeper = (WEBVIEW_INCOGNITO && WINDOW_CLOSE_TO_TRAY)
+        let _profile_keeper = (WEBVIEW_INCOGNITO && keep_alive_on_close())
             .then(|| build_profile_keeper(&event_loop, &mut web_context).ok())
             .flatten();
         if let Ok(window) = build_window(
@@ -518,7 +567,7 @@ mod windows_app {
                     ..
                 } => {
                     windows.remove(&window_id);
-                    if windows.is_empty() && !WINDOW_CLOSE_TO_TRAY {
+                    if windows.is_empty() && !keep_alive_on_close() {
                         *control_flow = ControlFlow::Exit;
                     }
                 }
@@ -556,7 +605,7 @@ mod windows_app {
                         app_window.window.set_title(&title);
                     }
                 }
-                #[cfg(feature = "close-to-tray")]
+                #[cfg(feature = "tray-icon")]
                 Event::UserEvent(UserEvent::TrayIconEvent(event)) => {
                     if matches!(
                         event,
@@ -577,7 +626,7 @@ mod windows_app {
                         );
                     }
                 }
-                #[cfg(feature = "close-to-tray")]
+                #[cfg(feature = "tray-icon")]
                 Event::UserEvent(UserEvent::MenuEvent(event)) => {
                     if let Some(tray) = &tray {
                         let id = event.id.0.as_str();
