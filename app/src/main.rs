@@ -21,6 +21,7 @@ mod windows_app {
     };
     #[cfg(feature = "reuse-instance")]
     use super::single_instance::{self, InstanceClaim};
+    #[cfg(feature = "regex-internal-urls")]
     use regex_lite::Regex;
     use std::{
         collections::HashMap,
@@ -37,7 +38,7 @@ mod windows_app {
         event::{Event, WindowEvent},
         event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget},
         platform::windows::{EventLoopBuilderExtWindows, IconExtWindows, WindowBuilderExtWindows},
-        window::{Fullscreen, Icon as WindowIcon, Theme, Window, WindowBuilder, WindowId},
+        window::{Fullscreen, Icon, Theme, Window, WindowBuilder, WindowId},
     };
     #[cfg(feature = "tray-icon")]
     use tray_icon::{
@@ -48,8 +49,13 @@ mod windows_app {
         NewWindowFeatures, NewWindowResponse, WebContext, WebView, WebViewBuilder,
         WebViewBuilderExtWindows,
     };
+    use windows_sys::Win32::UI::{
+        Shell::ShellExecuteW,
+        WindowsAndMessaging::SW_SHOWNORMAL,
+    };
 
     static WINDOW_COUNTER: AtomicUsize = AtomicUsize::new(1);
+    #[cfg(feature = "regex-internal-urls")]
     static INTERNAL_REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
     static WEBVIEW_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -81,6 +87,7 @@ mod windows_app {
     #[cfg(not(feature = "tray-icon"))]
     struct AppTray;
 
+    #[cfg(feature = "regex-internal-urls")]
     fn internal_regexes() -> &'static [Regex] {
         INTERNAL_REGEXES
             .get_or_init(|| {
@@ -93,17 +100,45 @@ mod windows_app {
     }
 
     fn is_internal_url(url: &str) -> bool {
-        APP_URLS.iter().any(|(_, prefix)| url.starts_with(prefix))
+        if APP_URLS.iter().any(|(_, prefix)| url.starts_with(prefix))
             || INTERNAL_URL_PREFIXES
                 .iter()
                 .any(|prefix| url.starts_with(prefix))
-            || internal_regexes()
+        {
+            return true;
+        }
+
+        #[cfg(feature = "regex-internal-urls")]
+        {
+            return internal_regexes()
                 .iter()
-                .any(|pattern| pattern.is_match(url))
+                .any(|pattern| pattern.is_match(url));
+        }
+
+        #[cfg(not(feature = "regex-internal-urls"))]
+        {
+            let _ = INTERNAL_URL_REGEXES;
+            false
+        }
     }
 
     fn open_external(url: &str) {
-        let _ = open::that_detached(url);
+        let open = wide_null("open");
+        let url = wide_null(url);
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                open.as_ptr(),
+                url.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            );
+        }
+    }
+
+    fn wide_null(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
     fn disable_drag_drop_script() -> &'static str {
@@ -255,13 +290,13 @@ mod windows_app {
         start_url_from_arg(env::args().nth(1).as_deref())
     }
 
-    fn app_icon() -> Option<WindowIcon> {
-        WindowIcon::from_resource(APP_ICON_RESOURCE_ID, Some(PhysicalSize::new(32, 32))).ok()
-    }
-
     #[cfg(feature = "tray-icon")]
     fn tray_icon() -> Option<tray_icon::Icon> {
         tray_icon::Icon::from_resource(APP_ICON_RESOURCE_ID, Some((32, 32))).ok()
+    }
+
+    fn window_icon() -> Option<Icon> {
+        Icon::from_resource(APP_ICON_RESOURCE_ID, Some(PhysicalSize::new(32, 32))).ok()
     }
 
     #[cfg(feature = "reuse-instance")]
@@ -343,8 +378,9 @@ mod windows_app {
         visible: bool,
     ) -> Result<AppWindow, String> {
         let fullscreen = WINDOW_FULLSCREEN.then_some(Fullscreen::Borderless(None));
-        let mut window_builder = WindowBuilder::new()
+        let window_builder = WindowBuilder::new()
             .with_title(APP_TITLE)
+            .with_window_icon(window_icon())
             .with_inner_size(size.unwrap_or_else(|| LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT)))
             .with_resizable(WINDOW_RESIZABLE)
             .with_decorations(WINDOW_TITLE_BAR)
@@ -354,12 +390,6 @@ mod windows_app {
             .with_theme(Some(Theme::Dark))
             .with_drag_and_drop(WINDOW_DRAG_DROP)
             .with_visible(visible);
-
-        if let Some(icon) = app_icon() {
-            window_builder = window_builder
-                .with_window_icon(Some(icon.clone()))
-                .with_taskbar_icon(Some(icon));
-        }
 
         let window = window_builder
             .build(event_loop)

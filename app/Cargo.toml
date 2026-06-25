@@ -7,31 +7,28 @@ rust-version = "1.96.0"
 build = "build.rs"
 
 [features]
+regex-internal-urls = ["dep:regex-lite"]
 tray-icon = ["dep:tray-icon"]
-reuse-instance = ["windows-sys"]
-notifications = ["windows"]
+reuse-instance = []
+notifications = ["dep:windows"]
 
 [dependencies]
 dirs = "6.0.0"
-regex-lite = "0.1.9"
+regex-lite = { version = "0.1.9", optional = true }
 
 [build-dependencies]
 winresource = { version = "=0.1.31", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
-open = { version = "5.3.3", features = ["shellexecute-on-windows"] }
 tao = { version = "=0.35.3", default-features = false, features = ["rwh_06"] }
 tray-icon = { version = "=0.24.1", default-features = false, optional = true }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"], optional = true }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows = { version = "0.61.3", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"], optional = true }
-wry = { version = "=0.55.1", default-features = false, features = ["protocol"] }
-
-[target.'cfg(not(windows))'.dependencies]
-open = "5.3.3"
+wry = { version = "=0.55.1", default-features = false }
 
 [profile.release]
 panic = "abort"
 codegen-units = 1
-lto = "thin"
+lto = true
 opt-level = "z"
 strip = true
