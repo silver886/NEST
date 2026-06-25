@@ -10,7 +10,8 @@ build = "build.rs"
 regex-internal-urls = ["dep:regex-lite"]
 tray-icon = ["dep:tray-icon"]
 reuse-instance = []
-notifications = ["dep:windows"]
+notifications = ["dep:webview2-com", "dep:windows"]
+use-favicon = ["dep:webview2-com", "dep:windows", "windows/Win32_Graphics_Imaging"]
 
 [dependencies]
 dirs = "6.0.0"
@@ -24,6 +25,7 @@ tao = { version = "=0.35.3", default-features = false, features = ["rwh_06"] }
 tray-icon = { version = "=0.24.1", default-features = false, optional = true }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows = { version = "0.61.3", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"], optional = true }
+webview2-com = { version = "=0.38.2", optional = true }
 wry = { version = "=0.55.1", default-features = false }
 
 [profile.release]

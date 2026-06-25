@@ -23,6 +23,8 @@ mod windows_app {
     use super::single_instance::{self, InstanceClaim};
     #[cfg(feature = "regex-internal-urls")]
     use regex_lite::Regex;
+    #[cfg(feature = "use-favicon")]
+    use std::sync::Mutex;
     use std::{
         collections::HashMap,
         env,
@@ -45,19 +47,52 @@ mod windows_app {
         MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
         menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     };
+    #[cfg(feature = "use-favicon")]
+    use webview2_com::{
+        FaviconChangedEventHandler, GetFaviconCompletedHandler,
+        Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG, ICoreWebView2_15,
+        },
+    };
+    #[cfg(feature = "notifications")]
+    use webview2_com::{
+        Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS,
+            COREWEBVIEW2_PERMISSION_STATE_ALLOW, COREWEBVIEW2_PERMISSION_STATE_DENY,
+            ICoreWebView2_13, ICoreWebView2_24, ICoreWebView2PermissionRequestedEventArgs3,
+            ICoreWebView2Profile4,
+        },
+        NotificationReceivedEventHandler, PermissionRequestedEventHandler,
+        SetPermissionStateCompletedHandler,
+    };
+    #[cfg(feature = "notifications")]
+    use windows::Win32::System::Com::CoTaskMemFree;
+    #[cfg(feature = "use-favicon")]
+    use windows::Win32::{
+        Graphics::Imaging::{
+            CLSID_WICImagingFactory, GUID_WICPixelFormat32bppRGBA, IWICImagingFactory,
+            WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnLoad,
+        },
+        System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IStream, STREAM_SEEK_SET},
+    };
+    #[cfg(any(feature = "notifications", feature = "use-favicon"))]
+    use windows::core::Interface;
+    #[cfg(feature = "notifications")]
+    use windows::core::{HSTRING, PWSTR};
+    use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+    #[cfg(any(feature = "notifications", feature = "use-favicon"))]
+    use wry::WebViewExtWindows;
     use wry::{
         NewWindowFeatures, NewWindowResponse, WebContext, WebView, WebViewBuilder,
         WebViewBuilderExtWindows,
-    };
-    use windows_sys::Win32::UI::{
-        Shell::ShellExecuteW,
-        WindowsAndMessaging::SW_SHOWNORMAL,
     };
 
     static WINDOW_COUNTER: AtomicUsize = AtomicUsize::new(1);
     #[cfg(feature = "regex-internal-urls")]
     static INTERNAL_REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
     static WEBVIEW_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+    #[cfg(feature = "use-favicon")]
+    static WINDOW_FAVICON_PATHS: OnceLock<Mutex<HashMap<WindowId, PathBuf>>> = OnceLock::new();
 
     const APP_ICON_RESOURCE_ID: u16 = 1;
 
@@ -66,6 +101,8 @@ mod windows_app {
         OpenArg(Option<String>),
         NewWindow(String, Option<LogicalSize<f64>>),
         NewTitle(WindowId, String),
+        #[cfg(feature = "use-favicon")]
+        Favicon(WindowId, Icon, PathBuf),
         #[cfg(feature = "tray-icon")]
         TrayIconEvent(TrayIconEvent),
         #[cfg(feature = "tray-icon")]
@@ -119,6 +156,350 @@ mod windows_app {
         {
             let _ = INTERNAL_URL_REGEXES;
             false
+        }
+    }
+
+    #[cfg(feature = "notifications")]
+    fn matches_internal_url_regex(url: &str) -> bool {
+        #[cfg(feature = "regex-internal-urls")]
+        {
+            return internal_regexes()
+                .iter()
+                .any(|pattern| pattern.is_match(url));
+        }
+
+        #[cfg(not(feature = "regex-internal-urls"))]
+        {
+            let _ = url;
+            let _ = INTERNAL_URL_REGEXES;
+            false
+        }
+    }
+
+    #[cfg(feature = "notifications")]
+    fn is_listed_internal_url(url: &str) -> bool {
+        APP_URLS.iter().any(|(_, prefix)| url.starts_with(prefix))
+            || INTERNAL_URL_PREFIXES
+                .iter()
+                .any(|prefix| url.starts_with(prefix))
+    }
+
+    #[cfg(feature = "notifications")]
+    fn allows_notification_permission(url: &str) -> bool {
+        is_listed_internal_url(url) || matches_internal_url_regex(url)
+    }
+
+    #[cfg(feature = "notifications")]
+    fn origin_from_url(url: &str) -> Option<String> {
+        let (scheme, rest) = url.split_once("://")?;
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return None;
+        }
+
+        let authority = rest.split(['/', '?', '#']).next()?;
+        if authority.is_empty() {
+            return None;
+        }
+
+        Some(format!("{}://{authority}/", scheme.to_ascii_lowercase()))
+    }
+
+    #[cfg(feature = "notifications")]
+    fn listed_notification_origins() -> Vec<String> {
+        let mut origins = Vec::new();
+        for url in APP_URLS
+            .iter()
+            .map(|(_, url)| *url)
+            .chain(INTERNAL_URL_PREFIXES.iter().copied())
+        {
+            let Some(origin) = origin_from_url(url) else {
+                continue;
+            };
+            if !origins.iter().any(|existing| existing == &origin) {
+                origins.push(origin);
+            }
+        }
+        origins
+    }
+
+    #[cfg(feature = "notifications")]
+    fn take_pwstr(value: PWSTR) -> String {
+        if value.is_null() {
+            return String::new();
+        }
+
+        unsafe {
+            let text = value.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(value.as_ptr() as _));
+            text
+        }
+    }
+
+    #[cfg(all(feature = "notifications", feature = "use-favicon"))]
+    fn notification_icon_path(window_id: WindowId) -> Option<PathBuf> {
+        WINDOW_FAVICON_PATHS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .ok()
+            .and_then(|paths| paths.get(&window_id).cloned())
+    }
+
+    #[cfg(feature = "use-favicon")]
+    fn set_window_favicon_path(window_id: WindowId, path: PathBuf) {
+        if let Ok(mut paths) = WINDOW_FAVICON_PATHS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+        {
+            paths.insert(window_id, path);
+        }
+    }
+
+    #[cfg(feature = "use-favicon")]
+    fn read_stream(stream: &IStream) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 8192];
+
+        loop {
+            let mut read = 0_u32;
+            let result = unsafe {
+                stream.Read(
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len() as u32,
+                    Some(&mut read),
+                )
+            };
+            if result.is_err() {
+                return None;
+            }
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read as usize]);
+        }
+
+        Some(bytes)
+    }
+
+    #[cfg(feature = "use-favicon")]
+    fn decode_favicon_rgba(stream: &IStream) -> Option<(Vec<u8>, u32, u32)> {
+        unsafe {
+            let _ = stream.Seek(0, STREAM_SEEK_SET, None);
+
+            let factory: IWICImagingFactory =
+                CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+            let decoder = factory
+                .CreateDecoderFromStream(stream, std::ptr::null(), WICDecodeMetadataCacheOnLoad)
+                .ok()?;
+            let frame = decoder.GetFrame(0).ok()?;
+            let converter = factory.CreateFormatConverter().ok()?;
+            converter
+                .Initialize(
+                    &frame,
+                    &GUID_WICPixelFormat32bppRGBA,
+                    WICBitmapDitherTypeNone,
+                    None,
+                    0.0,
+                    WICBitmapPaletteTypeCustom,
+                )
+                .ok()?;
+
+            let mut width = 0;
+            let mut height = 0;
+            converter.GetSize(&mut width, &mut height).ok()?;
+            if width == 0 || height == 0 || width > 512 || height > 512 {
+                return None;
+            }
+
+            let stride = width.checked_mul(4)?;
+            let len = stride.checked_mul(height)? as usize;
+            let mut rgba = vec![0; len];
+            converter
+                .CopyPixels(std::ptr::null(), stride, rgba.as_mut_slice())
+                .ok()?;
+
+            Some((rgba, width, height))
+        }
+    }
+
+    #[cfg(feature = "use-favicon")]
+    fn favicon_path(window_id: WindowId) -> PathBuf {
+        app_data_dir()
+            .join("favicons")
+            .join(format!("{window_id:?}.png").replace(['{', '}', ':', ' ', ','], "-"))
+    }
+
+    #[cfg(feature = "use-favicon")]
+    fn handle_favicon_stream(
+        stream: &IStream,
+        window_id: WindowId,
+        proxy: &EventLoopProxy<UserEvent>,
+    ) {
+        let Some(png) = read_stream(stream) else {
+            return;
+        };
+        let _ = unsafe { stream.Seek(0, STREAM_SEEK_SET, None) };
+        let Some((rgba, width, height)) = decode_favicon_rgba(stream) else {
+            return;
+        };
+        let Ok(icon) = Icon::from_rgba(rgba, width, height) else {
+            return;
+        };
+
+        let path = favicon_path(window_id);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&path, png).is_ok() {
+            let _ = proxy.send_event(UserEvent::Favicon(window_id, icon, path));
+        }
+    }
+
+    #[cfg(feature = "use-favicon")]
+    fn configure_favicon_updates(
+        window_id: WindowId,
+        webview: &WebView,
+        proxy: EventLoopProxy<UserEvent>,
+    ) {
+        let core = webview.webview();
+        let Ok(webview15) = core.cast::<ICoreWebView2_15>() else {
+            return;
+        };
+
+        unsafe {
+            let mut token = 0;
+            let changed_proxy = proxy.clone();
+            let _ = webview15.add_FaviconChanged(
+                &FaviconChangedEventHandler::create(Box::new(move |webview, _| {
+                    let Some(webview) = webview else {
+                        return Ok(());
+                    };
+                    let Ok(webview15) = webview.cast::<ICoreWebView2_15>() else {
+                        return Ok(());
+                    };
+
+                    let proxy = changed_proxy.clone();
+                    let _ = webview15.GetFavicon(
+                        COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG,
+                        &GetFaviconCompletedHandler::create(Box::new(move |error, stream| {
+                            if error.is_ok() {
+                                if let Some(stream) = stream.as_ref() {
+                                    handle_favicon_stream(stream, window_id, &proxy);
+                                }
+                            }
+                            Ok(())
+                        })),
+                    );
+
+                    Ok(())
+                })),
+                &mut token,
+            );
+
+            let proxy = proxy.clone();
+            let _ = webview15.GetFavicon(
+                COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG,
+                &GetFaviconCompletedHandler::create(Box::new(move |error, stream| {
+                    if error.is_ok() {
+                        if let Some(stream) = stream.as_ref() {
+                            handle_favicon_stream(stream, window_id, &proxy);
+                        }
+                    }
+                    Ok(())
+                })),
+            );
+        }
+    }
+
+    #[cfg(feature = "notifications")]
+    fn configure_html5_notifications(window_id: WindowId, webview: &WebView) {
+        if !APP_NOTIFICATIONS {
+            return;
+        }
+
+        let core = webview.webview();
+
+        unsafe {
+            let mut token = 0;
+            let _ = core.add_PermissionRequested(
+                &PermissionRequestedEventHandler::create(Box::new(|_, args| {
+                    let Some(args) = args else {
+                        return Ok(());
+                    };
+
+                    let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+                    args.PermissionKind(&mut kind)?;
+                    if kind != COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS {
+                        return Ok(());
+                    }
+
+                    let uri = {
+                        let mut uri = PWSTR::null();
+                        args.Uri(&mut uri)?;
+                        take_pwstr(uri)
+                    };
+
+                    if allows_notification_permission(&uri) {
+                        if let Ok(args3) = args.cast::<ICoreWebView2PermissionRequestedEventArgs3>()
+                        {
+                            let _ = args3.SetSavesInProfile(true);
+                        }
+                        args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+                    } else {
+                        args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
+                    }
+
+                    Ok(())
+                })),
+                &mut token,
+            );
+
+            if let Ok(webview24) = core.cast::<ICoreWebView2_24>() {
+                let _ = webview24.add_NotificationReceived(
+                    &NotificationReceivedEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else {
+                            return Ok(());
+                        };
+
+                        let notification = args.Notification()?;
+                        let title = {
+                            let mut title = PWSTR::null();
+                            notification.Title(&mut title)?;
+                            take_pwstr(title)
+                        };
+                        let body = {
+                            let mut body = PWSTR::null();
+                            notification.Body(&mut body)?;
+                            take_pwstr(body)
+                        };
+
+                        args.SetHandled(true)?;
+                        notify_web(window_id, &title, &body);
+                        let _ = notification.ReportShown();
+
+                        Ok(())
+                    })),
+                    &mut token,
+                );
+            }
+
+            let Ok(profile) = core
+                .cast::<ICoreWebView2_13>()
+                .and_then(|webview| webview.Profile())
+                .and_then(|profile| profile.cast::<ICoreWebView2Profile4>())
+            else {
+                return;
+            };
+
+            for origin in listed_notification_origins() {
+                let origin = HSTRING::from(origin);
+                let handler = SetPermissionStateCompletedHandler::create(Box::new(|_| Ok(())));
+                let _ = profile.SetPermissionState(
+                    COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS,
+                    &origin,
+                    COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+                    &handler,
+                );
+            }
         }
     }
 
@@ -242,10 +623,12 @@ mod windows_app {
     }
 
     #[cfg(feature = "notifications")]
-    fn notify_download_finished(path: Option<&PathBuf>, success: bool) {
+    fn notify_download_finished(window_id: WindowId, path: Option<&PathBuf>, success: bool) {
         if !APP_NOTIFICATIONS {
             return;
         }
+        #[cfg(not(feature = "use-favicon"))]
+        let _ = window_id;
 
         let (title, body, download_path) = if success {
             (
@@ -257,7 +640,36 @@ mod windows_app {
         } else {
             ("Download failed", "Download failed".to_string(), None)
         };
-        super::windows_notifications::notify(APP_IDENTIFIER, title, &body, download_path);
+        #[cfg(feature = "use-favicon")]
+        let icon_path = notification_icon_path(window_id);
+        #[cfg(not(feature = "use-favicon"))]
+        let icon_path: Option<PathBuf> = None;
+        super::windows_notifications::notify(
+            APP_IDENTIFIER,
+            title,
+            &body,
+            download_path,
+            icon_path.as_deref(),
+        );
+    }
+
+    #[cfg(feature = "notifications")]
+    fn notify_web(window_id: WindowId, title: &str, body: &str) {
+        if APP_NOTIFICATIONS {
+            #[cfg(not(feature = "use-favicon"))]
+            let _ = window_id;
+            #[cfg(feature = "use-favicon")]
+            let icon_path = notification_icon_path(window_id);
+            #[cfg(not(feature = "use-favicon"))]
+            let icon_path: Option<PathBuf> = None;
+            super::windows_notifications::notify(
+                APP_IDENTIFIER,
+                title,
+                body,
+                None,
+                icon_path.as_deref(),
+            );
+        }
     }
 
     fn app_url_for_selection(selection: Option<&str>) -> &'static str {
@@ -420,7 +832,7 @@ mod windows_app {
             NewWindowResponse::Deny
         };
 
-        let title_proxy = proxy;
+        let title_proxy = proxy.clone();
         let title_handler = move |title: String| {
             let _ = title_proxy.send_event(UserEvent::NewTitle(window_id, title));
         };
@@ -438,8 +850,8 @@ mod windows_app {
             if APP_NOTIFICATIONS {
                 webview_builder = webview_builder
                     .with_download_started_handler(|_, _| true)
-                    .with_download_completed_handler(|_, path, success| {
-                        notify_download_finished(path.as_ref(), success);
+                    .with_download_completed_handler(move |_, path, success| {
+                        notify_download_finished(window_id, path.as_ref(), success);
                     });
             }
         }
@@ -456,6 +868,10 @@ mod windows_app {
         let webview = webview_builder
             .build(&window)
             .map_err(|err| err.to_string())?;
+        #[cfg(feature = "notifications")]
+        configure_html5_notifications(window_id, &webview);
+        #[cfg(feature = "use-favicon")]
+        configure_favicon_updates(window_id, &webview, proxy.clone());
 
         Ok(AppWindow {
             window,
@@ -493,6 +909,8 @@ mod windows_app {
         let webview = webview_builder
             .build(&window)
             .map_err(|err| err.to_string())?;
+        #[cfg(feature = "notifications")]
+        configure_html5_notifications(window.id(), &webview);
 
         Ok(AppWindow {
             window,
@@ -633,6 +1051,13 @@ mod windows_app {
                 Event::UserEvent(UserEvent::NewTitle(window_id, title)) => {
                     if let Some(app_window) = windows.get(&window_id) {
                         app_window.window.set_title(&title);
+                    }
+                }
+                #[cfg(feature = "use-favicon")]
+                Event::UserEvent(UserEvent::Favicon(window_id, icon, path)) => {
+                    if let Some(app_window) = windows.get(&window_id) {
+                        app_window.window.set_window_icon(Some(icon));
+                        set_window_favicon_path(window_id, path);
                     }
                 }
                 #[cfg(feature = "tray-icon")]

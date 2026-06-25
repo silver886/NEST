@@ -38,8 +38,14 @@ pub fn install(app_id: &str, title: &str) {
     let _ = init(app_id, title);
 }
 
-pub fn notify(app_id: &str, title: &str, body: &str, download_path: Option<&Path>) {
-    let _ = show_toast(app_id, title, body, download_path);
+pub fn notify(
+    app_id: &str,
+    title: &str,
+    body: &str,
+    download_path: Option<&Path>,
+    icon_path: Option<&Path>,
+) {
+    let _ = show_toast(app_id, title, body, download_path, icon_path);
 }
 
 fn init(app_id: &str, title: &str) -> Result<()> {
@@ -143,11 +149,26 @@ fn safe_filename(title: &str) -> String {
     }
 }
 
-fn show_toast(app_id: &str, title: &str, body: &str, download_path: Option<&Path>) -> Result<()> {
+fn show_toast(
+    app_id: &str,
+    title: &str,
+    body: &str,
+    download_path: Option<&Path>,
+    icon_path: Option<&Path>,
+) -> Result<()> {
     let file_uri = download_path.map(path_to_file_uri);
     let folder_uri = download_path
         .and_then(|path| path.parent())
         .map(path_to_file_uri);
+    let icon = icon_path
+        .map(path_to_file_uri)
+        .map(|uri| {
+            format!(
+                r#"<image placement="appLogoOverride" src="{}"/>"#,
+                escape_xml(&uri)
+            )
+        })
+        .unwrap_or_default();
     let launch = file_uri
         .as_ref()
         .map(|uri| format!(r#" activationType="protocol" launch="{}""#, escape_xml(uri)))
@@ -166,8 +187,9 @@ fn show_toast(app_id: &str, title: &str, body: &str, download_path: Option<&Path
     };
     let xml = XmlDocument::new()?;
     xml.LoadXml(&HSTRING::from(format!(
-        r#"<toast{}><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual>{}</toast>"#,
+        r#"<toast{}><visual><binding template="ToastGeneric">{}<text>{}</text><text>{}</text></binding></visual>{}</toast>"#,
         launch,
+        icon,
         escape_xml(title),
         escape_xml(body),
         actions

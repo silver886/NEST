@@ -126,7 +126,7 @@ RUN set -eux; \
     mkdir -p ./out/; \
     output="$(realpath ./out/$(jq -r '.app.identifier // "app"' "${CONFIG_JSON}").exe)"; \
     cargo_name="$(jq -r '(.app.identifier // "nest") | gsub("[^A-Za-z0-9_-]"; "-") | if length == 0 then "nest" else . end' "${CONFIG_JSON}")"; \
-    cargo_features="$(jq -r '[if ((.internal_url.regexes // []) | length > 0) then "regex-internal-urls" else empty end, if (.app.tray_icon // false) then "tray-icon" else empty end, if (.app.reuse_instance // false) then "reuse-instance" else empty end, if (.app.notifications // false) then "notifications" else empty end] | if length > 0 then "--features=" + join(",") else "" end' "${CONFIG_JSON}")"; \
+    cargo_features="$(jq -r '[if ((.internal_url.regexes // []) | length > 0) then "regex-internal-urls" else empty end, if (.app.tray_icon // false) then "tray-icon" else empty end, if (.app.reuse_instance // false) then "reuse-instance" else empty end, if (.app.notifications // false) then "notifications" else empty end, if (.app.use_favicon // false) then "use-favicon" else empty end] | if length > 0 then "--features=" + join(",") else "" end' "${CONFIG_JSON}")"; \
     cargo build --release --locked --target x86_64-pc-windows-msvc --manifest-path=./app/Cargo.toml ${cargo_features}; \
     cp "./app/target/x86_64-pc-windows-msvc/release/${cargo_name}.exe" "$output"; \
     ls -lh "$output"

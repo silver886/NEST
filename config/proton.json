@@ -19,6 +19,7 @@
       "lumo": "https://lumo.proton.me/",
       "meet": "https://meet.proton.me/"
     },
+    "use_favicon": true,
     "tray_icon": true,
     "notifications": true,
     "close_to_tray": true,

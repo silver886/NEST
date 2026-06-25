@@ -7,6 +7,7 @@
     "url": {
       "pdf": "https://pdf.longhill.io/"
     },
+    "use_favicon": true,
     "tray_icon": false,
     "notifications": true,
     "close_to_tray": false,
