@@ -35,6 +35,11 @@ mod windows_app {
             atomic::{AtomicUsize, Ordering},
         },
     };
+    #[cfg(feature = "use-favicon")]
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
     use tao::{
         dpi::{LogicalSize, PhysicalSize},
         event::{Event, WindowEvent},
@@ -90,7 +95,7 @@ mod windows_app {
     static WINDOW_COUNTER: AtomicUsize = AtomicUsize::new(1);
     #[cfg(feature = "regex-internal-urls")]
     static INTERNAL_REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
-    static WEBVIEW_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+    static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
     #[cfg(feature = "use-favicon")]
     static WINDOW_FAVICON_PATHS: OnceLock<Mutex<HashMap<WindowId, PathBuf>>> = OnceLock::new();
 
@@ -323,9 +328,16 @@ mod windows_app {
 
     #[cfg(feature = "use-favicon")]
     fn favicon_path(window_id: WindowId) -> PathBuf {
-        app_data_dir()
+        data_dir()
             .join("favicons")
-            .join(format!("{window_id:?}.png").replace(['{', '}', ':', ' ', ','], "-"))
+            .join(format!("{:016x}.png", window_id_hash(window_id)))
+    }
+
+    #[cfg(feature = "use-favicon")]
+    fn window_id_hash(window_id: WindowId) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        window_id.hash(&mut hasher);
+        hasher.finish()
     }
 
     #[cfg(feature = "use-favicon")]
@@ -586,25 +598,21 @@ mod windows_app {
         format!("{app}-")
     }
 
-    fn app_data_dir() -> PathBuf {
-        let app = APP_IDENTIFIER
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect::<String>();
-
-        dirs::data_local_dir()
-            .unwrap_or_else(env::temp_dir)
-            .join("nest")
-            .join(app)
-    }
-
-    fn webview_data_dir() -> PathBuf {
-        WEBVIEW_DATA_DIR
+    fn data_dir() -> PathBuf {
+        DATA_DIR
             .get_or_init(|| {
                 if WEBVIEW_INCOGNITO {
                     env::temp_dir().join(format!("{}{}", data_dir_prefix(), process::id()))
                 } else {
-                    app_data_dir()
+                    let app = APP_IDENTIFIER
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                        .collect::<String>();
+
+                    dirs::data_local_dir()
+                        .unwrap_or_else(env::temp_dir)
+                        .join("nest")
+                        .join(app)
                 }
             })
             .clone()
@@ -980,7 +988,7 @@ mod windows_app {
         event_loop_builder.with_theme(Some(Theme::Dark));
         let event_loop = event_loop_builder.build();
         let proxy = event_loop.create_proxy();
-        let mut web_context = WebContext::new(Some(webview_data_dir()));
+        let mut web_context = WebContext::new(Some(data_dir()));
 
         install_reuse_instance_listener(proxy.clone());
         #[cfg(feature = "tray-icon")]
